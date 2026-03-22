@@ -19,8 +19,8 @@ export interface TankaResult {
 
 export async function generateTanka(feeling: string): Promise<TankaResult> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("APIキーが見つかりません。設定を確認してください。");
+  if (!apiKey || apiKey.trim() === "") {
+    throw new Error("APIキーが設定されていないか、空です。アプリの「Settings」メニューからAPIキーを正しく設定し、再度「Publish」してください。");
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -50,49 +50,75 @@ export async function generateTanka(feeling: string): Promise<TankaResult> {
 レスポンスは必ず指定されたJSON形式で返してください。
 `;
 
-  const response = await ai.models.generateContent({
-    model: model,
-    contents: [{ role: "user", parts: [{ text: `今の気持ち: ${feeling}` }] }],
-    config: {
-      systemInstruction: systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          famousTanka: {
-            type: Type.OBJECT,
-            properties: {
-              poem: { type: Type.STRING, description: "有名な短歌（五七五七七）" },
-              poet: { type: Type.STRING, description: "作者名" },
-              explanation: { type: Type.STRING, description: "選定理由の解説" }
-            },
-            required: ["poem", "poet", "explanation"]
-          },
-          manyoshuTanka: {
-            type: Type.OBJECT,
-            properties: {
-              poem: { type: Type.STRING, description: "万葉集の短歌（五七五七七）" },
-              poet: { type: Type.STRING, description: "作者名" },
-              explanation: { type: Type.STRING, description: "選定理由の解説" }
-            },
-            required: ["poem", "poet", "explanation"]
-          },
-          generatedTanka: {
-            type: Type.OBJECT,
-            properties: {
-              poem: { type: Type.STRING, description: "AIが生成した短歌（五七五七七）" },
-              explanation: { type: Type.STRING, description: "歌の解説" }
-            },
-            required: ["poem", "explanation"]
-          }
-        },
-        required: ["famousTanka", "manyoshuTanka", "generatedTanka"]
-      }
-    }
-  });
+  const maxRetries = 3;
+  let lastError: any;
 
-  const text = response.text;
-  if (!text) throw new Error("AIからの応答が空でした。");
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: [{ role: "user", parts: [{ text: `今の気持ち: ${feeling}` }] }],
+        config: {
+          systemInstruction: systemInstruction,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              famousTanka: {
+                type: Type.OBJECT,
+                properties: {
+                  poem: { type: Type.STRING, description: "有名な短歌（五七五七七）" },
+                  poet: { type: Type.STRING, description: "作者名" },
+                  explanation: { type: Type.STRING, description: "選定理由の解説" }
+                },
+                required: ["poem", "poet", "explanation"]
+              },
+              manyoshuTanka: {
+                type: Type.OBJECT,
+                properties: {
+                  poem: { type: Type.STRING, description: "万葉集の短歌（五七五七七）" },
+                  poet: { type: Type.STRING, description: "作者名" },
+                  explanation: { type: Type.STRING, description: "選定理由の解説" }
+                },
+                required: ["poem", "poet", "explanation"]
+              },
+              generatedTanka: {
+                type: Type.OBJECT,
+                properties: {
+                  poem: { type: Type.STRING, description: "AIが生成した短歌（五七五七七）" },
+                  explanation: { type: Type.STRING, description: "歌の解説" }
+                },
+                required: ["poem", "explanation"]
+              }
+            },
+            required: ["famousTanka", "manyoshuTanka", "generatedTanka"]
+          }
+        }
+      });
+
+      const text = response.text;
+      if (!text) throw new Error("AIからの応答が空でした。");
+      return JSON.parse(text) as TankaResult;
+    } catch (error: any) {
+      lastError = error;
+      // 429 (Rate Limit / Quota) の場合は指数バックオフでリトライ
+      if (error?.message?.includes("429") || error?.status === 429 || error?.message?.includes("RESOURCE_EXHAUSTED")) {
+        // "spending cap" の場合はリトライしても無駄な可能性が高いが、一応試みる
+        const delay = Math.pow(2, i) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (lastError?.message?.includes("spending cap") || lastError?.message?.includes("RESOURCE_EXHAUSTED")) {
+    throw new Error("AIの利用制限（予算上限またはクォータ）に達しました。Google Cloud Consoleの「お支払い」メニューで予算設定（Spending Cap）を確認するか、しばらく待ってから再度お試しください。");
+  }
+
+  if (lastError?.message?.includes("API key not valid") || lastError?.status === 400) {
+    throw new Error("APIキーが無効です。アプリの「Settings」メニューから正しいAPIキーが設定されているか確認してください。");
+  }
   
-  return JSON.parse(text) as TankaResult;
+  throw lastError;
 }
